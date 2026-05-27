@@ -240,12 +240,26 @@ function fmtStrategy(result, budget) {
   const v = result.verdict || {};
   const bestKey = v.best_strategy || "combo_1";
   const bestCombo = s[bestKey] || s.combo_1;
+  const ma = result.matches_analysis || [];
 
   let msg = `🎯 *BETS DU SOIR* \\| ${e(budget)}€ \\| ${e(v.confidence_overall || "?")}\n`;
   if (v.key_risk_of_the_day) msg += `⚠️ _${e(v.key_risk_of_the_day)}_\n`;
   msg += `\n`;
 
-  // SIMPLES — ultra concis
+  // PARIS JOUEURS VALUE (le truc que le marché rate)
+  const playerBets = ma.flatMap(m => (m.player_value_bets || []).filter(p => p && p.value_pct >= 6 && p.odds));
+  if (playerBets.length) {
+    msg += `🎯 *PARIS JOUEURS VALUE:*\n`;
+    playerBets.forEach(p => {
+      msg += `• *${e(p.player)}* buteur @ ${e(p.odds)}\n`;
+      msg += `  Taux réel: ${e(p.real_scoring_rate_pct)}% \\| Cote implicite: ${e(p.implied_prob_pct)}% \\| Value: \\+${e(p.value_pct)}%\n`;
+      msg += `  _${e(p.why)}_\n`;
+      if (p.titularisation && p.titularisation !== 'confirmée') msg += `  ⚠️ Titularisation: ${e(p.titularisation)}\n`;
+    });
+    msg += `\n`;
+  }
+
+  // SIMPLES
   if (s.best_singles?.length) {
     msg += `*▶️ PARIS À PLACER:*\n`;
     s.best_singles.forEach(b => {
@@ -255,25 +269,24 @@ function fmtStrategy(result, budget) {
     msg += `\n`;
   }
 
-  // MEILLEUR COMBO seulement
+  // MEILLEUR COMBO
   if (bestCombo?.legs?.length) {
-    msg += `*🔥 COMBO ${e(bestCombo.label?.replace("Combiné ", "") || "")}* @ *${e(bestCombo.combined_odds?.toFixed(2))}* \\| Mise ${e(bestCombo.stake_suggested)}€ → *${e(bestCombo.potential_return)}€*\n`;
+    msg += `*🔥 COMBO ${e(bestCombo.label || "")}* @ *${e(bestCombo.combined_odds?.toFixed(2))}* \\| ${e(bestCombo.stake_suggested)}€ → *${e(bestCombo.potential_return)}€*\n`;
     bestCombo.legs.forEach(l => {
       const ri = { banquier: "🔒", révisé: "🔄", risqué: "⚡", "leg tueur": "💀" }[l.role] || "•";
-      msg += `${ri} ${e(l.selection)} @ ${e(l.odds)}\n`;
-      msg += `  _${e(l.matchup)}_\n`;
+      msg += `${ri} ${e(l.selection)} @ ${e(l.odds)} — _${e(l.matchup)}_\n`;
     });
     if (bestCombo.weak_leg) msg += `⚠️ _${e(bestCombo.weak_leg)}_\n`;
     if (bestCombo.cashout_advice) msg += `💸 _${e(bestCombo.cashout_advice)}_\n`;
     msg += `\n`;
   }
 
-  // Autres combos — résumé 1 ligne chacun
+  // Autres combos résumé
   const otherCombos = [s.combo_1, s.combo_2, s.combo_3].filter(c => c && c !== bestCombo && c.legs?.length);
   if (otherCombos.length) {
     msg += `*Alternatives:*\n`;
     otherCombos.forEach(c => {
-      msg += `• ${e(c.label?.replace("Combiné ", "") || "")} @ ${e(c.combined_odds?.toFixed(2))} — ${e(c.stake_suggested)}€ → ${e(c.potential_return)}€\n`;
+      msg += `• ${e(c.label || "")} @ ${e(c.combined_odds?.toFixed(2))} — ${e(c.stake_suggested)}€ → ${e(c.potential_return)}€\n`;
     });
   }
 
@@ -286,16 +299,46 @@ const PARSE_PROMPT = `Extrais tous les matchs visibles.
 {"matches":[{"team1":"...","team2":"...","league":"...","time":"HH:MM","odds":{"home":2.1,"draw":3.5,"away":3.2},"markets_visible":[{"name":"Over 2.5","odds":1.85}]}],"confidence":"HIGH|MEDIUM|LOW","notes":"..."}
 N'invente rien. Cotes inconnues = null.`;
 
-const BATCH_SYS = `Tu es un trader bookmaker professionnel. Tu analyses PLUSIEURS matchs simultanément et construis la meilleure stratégie directement.
-Recherche web OBLIGATOIRE pour chaque match. Inside angle + contre-argument par bet. JSON pur seulement.
-RÈGLE ABSOLUE: ne recommande JAMAIS un pari joueur spécifique (buteur, cartons) sauf si tu as trouvé une source web qui confirme ses stats récentes ET sa titularisation. Si tu n'as pas cette info, mets simplement un pari Over/Under ou handicap à la place. Vaut mieux pas de pari joueur qu'un pari inventé.`;
+const BATCH_SYS = `Tu es un trader bookmaker professionnel spécialisé dans la détection d'anomalies de marché.
+
+TON EDGE: tu trouves ce que le marché grand public rate. Pas les paris évidents — les angles cachés.
+
+MÉTHODE OBLIGATOIRE pour chaque match:
+1. Recherche web les stats détaillées: FBref, Sofascore, Whoscored, Footystats
+2. Pour les BUTS: cherche les buts par 90 min de chaque attaquant titulaire probable
+   → Si un joueur marque dans 28% de ses matchs mais est coté 4.50 (=22% implicite) = VALUE
+   → Priorité aux joueurs: en forme (2+ buts sur 5 derniers), qui prennent les corners/penalties, bon matchup défensif ce soir
+3. Pour les ÉQUIPES: cherche les under-performance récentes (xG vs goals) — une équipe qui sur-performe son xG va régresser
+4. Pour les MARCHÉS: cherche les Over/Under où le marché est influencé par le résultat du dernier match (biais de récence)
+5. Compare TOUJOURS: taux réel observé sur 10 matchs vs probabilité implicite dans la cote
+
+RÈGLES ABSOLUES:
+- Pari joueur UNIQUEMENT si tu as trouvé son taux de buts et confirmé sa titularisation probable
+- Jamais un pari "Victoire favorite" sans que la cote offre au moins 8% de value calculée
+- Si tu ne trouves pas d'angle — dis skip, ne remplis pas avec du bruit
+- JSON pur seulement`;
 
 function buildBatchPrompt(matches, budget) {
   const today = new Date().toISOString().slice(0, 10);
   const list = matches.map((m, i) =>
     `Match ${i+1}: ${m.team1} vs ${m.team2} | ${m.league||'?'} | ${m.time||'?'} | Cotes: ${m.odds?.home||'?'}/${m.odds?.draw||'?'}/${m.odds?.away||'?'}`
   ).join('\n');
-  return `MATCHS (${matches.length}) — Date: ${today}\n${list}\nBUDGET: ${budget}€\n\nJSON:\n{"matches_analysis":[{"matchup":"...","league":"...","time":"...","context":"2 phrases","skip":false,"skip_reason":null,"best_bet":{"market":"...","selection":"...","odds":1.85,"value_pct":14.7,"stars":4,"risk":"LOW|MEDIUM|HIGH","reasons":[{"text":"...","source":"FBref/Sofascore/..."}],"counter_arg":"...","inside_angle":"..."}}],"strategy":{"combo_1":{"label":"Combiné SOLIDE","profile":"solide","legs":[{"matchup":"...","selection":"...","odds":1.85,"role":"banquier|révisé|risqué|leg tueur","why_this_leg":"..."}],"combined_odds":5.4,"prob_estimate":0.22,"stake_suggested":5,"potential_return":27,"weak_leg":"...","cashout_advice":"..."},"combo_2":{"label":"Combiné ÉQUILIBRÉ","profile":"équilibré","legs":[...],"combined_odds":8.2,"prob_estimate":0.15,"stake_suggested":4,"potential_return":33,"weak_leg":"...","cashout_advice":"..."},"combo_3":{"label":"Combiné RISQUÉ","profile":"risqué","legs":[...],"combined_odds":14.0,"prob_estimate":0.08,"stake_suggested":3,"potential_return":42,"weak_leg":"...","cashout_advice":"..."},"best_singles":[{"matchup":"...","selection":"...","odds":2.1,"value_pct":12.0,"stake_suggested":4,"rationale":"..."}],"hedge_note":"..."},"verdict":{"best_strategy":"combo_1|combo_2|combo_3","rationale":"...","total_stake_recommended":12,"max_return_if_best_hits":82,"key_risk_of_the_day":"...","confidence_overall":"HIGH|MEDIUM|LOW"}}`;
+  return `MATCHS (${matches.length}) — Date: ${today}
+${list}
+BUDGET: ${budget}€
+
+Pour chaque match, cherche OBLIGATOIREMENT:
+A) Les buteurs en forme avec leur taux réel (buts/matchs joués cette saison) vs leur cote actuelle
+B) Les set piece specialists (corners, penalties) souvent sous-évalués par le marché
+C) Les matchups défensifs favorables (attaquant rapide vs défenseur lent, etc.)
+D) L'historique Over/Under des 5 derniers matchs des DEUX équipes + H2H
+E) Les anomalies xG (équipe qui sur/sous-performe = regression à venir)
+
+JSON:
+{"matches_analysis":[{"matchup":"...","league":"...","time":"...","context":"enjeu + classement en 1 phrase","skip":false,"skip_reason":null,"best_bet":{"market":"...","selection":"...","odds":1.85,"value_pct":14.7,"stars":4,"risk":"LOW|MEDIUM|HIGH","reasons":[{"text":"stat précise avec chiffre","source":"FBref/Sofascore/..."}],"counter_arg":"...","inside_angle":"pourquoi le marché rate ça"},"player_value_bets":[{"player":"...","team":"...","market":"Buteur anytime|Premier buteur","odds":4.0,"real_scoring_rate_pct":32,"implied_prob_pct":25,"value_pct":7,"stars":3,"why":"a marqué dans 4 des 5 derniers, face à une défense qui concède en moyenne 1.8 xG/match","source":"FBref","titularisation":"confirmée/probable/incertaine"}]}],"strategy":{"combo_1":{"label":"SOLIDE","profile":"solide","legs":[{"matchup":"...","selection":"...","odds":1.85,"role":"banquier|révisé|risqué","why_this_leg":"1 phrase"}],"combined_odds":5.4,"prob_estimate":0.22,"stake_suggested":5,"potential_return":27,"weak_leg":"...","cashout_advice":"..."},"combo_2":{"label":"ÉQUILIBRÉ","profile":"équilibré","legs":[...],"combined_odds":8.2,"prob_estimate":0.15,"stake_suggested":4,"potential_return":33},"combo_3":{"label":"RISQUÉ","profile":"risqué","legs":[...],"combined_odds":14.0,"prob_estimate":0.08,"stake_suggested":3,"potential_return":42},"best_singles":[{"matchup":"...","selection":"...","odds":2.1,"value_pct":12.0,"stake_suggested":4,"rationale":"1 phrase"}]},"verdict":{"best_strategy":"combo_1|combo_2|combo_3","rationale":"...","total_stake_recommended":12,"max_return_if_best_hits":82,"key_risk_of_the_day":"...","confidence_overall":"HIGH|MEDIUM|LOW"}}
+
+IMPORTANT: le champ player_value_bets est OBLIGATOIRE pour chaque match avec au moins 1 tentative de recherche.
+Si tu n'as pas le taux réel du joueur = mets null dans player_value_bets et explique pourquoi dans skip_reason.`;
 }
 
 const LIVE_SYS = `Tu es un analyste paris live expert qui COMPARE les stats live aux données historiques.
